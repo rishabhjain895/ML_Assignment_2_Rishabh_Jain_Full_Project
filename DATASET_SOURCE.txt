@@ -1,0 +1,1 @@
+Wisconsin Breast Cancer Diagnostic dataset, accessed through sklearn.datasets.load_breast_cancer. UCI source: https://archive.ics.uci.edu/dataset/17/breast+cancer+wisconsin+diagnostic. 569 rows, 30 numeric features. Encoding: 1=Malignant, 0=Benign.\n
