@@ -1,5 +1,4 @@
 from pathlib import Path
-import subprocess
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -42,20 +41,31 @@ st.write("Explore five classification models using an uploaded test CSV.")
 st.info("Target encoding: 1 = Malignant (positive class); 0 = Benign.")
 
 
+def patch_estimator(estimator):
+    """Dynamically backports missing attributes from sklearn 1.8.0 to 1.5.2."""
+    cls_name = getattr(estimator, "__class__", None).__name__ if hasattr(estimator, "__class__") else ""
+    if cls_name == "LogisticRegression":
+        if not hasattr(estimator, "multi_class"):
+            estimator.multi_class = "auto"
+    return estimator
+
+
 def get_model(model_name: str):
-    """Loads model with automated retraining fallback if serialization mismatch occurs."""
+    """Loads model and applies version-compatibility patching."""
     model_path = ROOT / "models" / MODEL_FILES[model_name]
-    try:
-        if not model_path.exists():
-            raise FileNotFoundError(f"{model_path.name} not found.")
-        return joblib.load(model_path)
-    except Exception as e:
-        st.warning(f"Detected model incompatibility or missing file ({e}). Regenerating models via train.py...")
-        train_script = ROOT / "train.py"
-        if train_script.exists():
-            subprocess.run(["python", str(train_script)], check=True)
-            return joblib.load(model_path)
-        raise e
+    if not model_path.exists():
+        st.error(f"Model file not found: {model_path.name}")
+        st.stop()
+
+    model = joblib.load(model_path)
+
+    # Patch final classifier if wrapped inside a Pipeline
+    if hasattr(model, "steps") and len(model.steps) > 0:
+        patch_estimator(model.steps[-1][1])
+    else:
+        patch_estimator(model)
+
+    return model
 
 
 uploaded = st.file_uploader("Upload test dataset (CSV)", type=["csv"])
@@ -74,16 +84,31 @@ if uploaded is not None:
         st.stop()
 
     model = get_model(choice)
-    pred = model.predict(X)
 
-    # Safe probability computation (handles SVC without probability=True)
+    try:
+        pred = model.predict(X)
+    except Exception as e:
+        st.error(f"Prediction failed: {e}")
+        st.stop()
+
+    # Robust probability computation across all model families
+    prob = None
     if hasattr(model, "predict_proba"):
-        prob = model.predict_proba(X)[:, 1]
-    elif hasattr(model, "decision_function"):
-        df_vals = model.decision_function(X)
-        prob = (df_vals - df_vals.min()) / (df_vals.max() - df_vals.min() + 1e-9)
-    else:
-        prob = pred.astype(float)
+        try:
+            prob = model.predict_proba(X)[:, 1]
+        except AttributeError:
+            pass
+
+    if prob is None:
+        if hasattr(model, "decision_function"):
+            try:
+                df_vals = model.decision_function(X)
+                # Apply min-max normalization to project decision values to [0, 1]
+                prob = (df_vals - df_vals.min()) / (df_vals.max() - df_vals.min() + 1e-9)
+            except Exception:
+                prob = pred.astype(float)
+        else:
+            prob = pred.astype(float)
 
     out = X.copy()
     out["predicted_target"] = pred
